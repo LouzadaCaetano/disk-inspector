@@ -7,6 +7,10 @@
 #include <map>
 #include <string>
 #include <vector>
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -72,46 +76,63 @@ int main(int argc, char* argv[]) {
     std::map<fs::path, FolderInfo> folders;
     std::vector<FileInfo> largest;
     std::uintmax_t totalBytes = 0, fileCount = 0, skipped = 0;
-    fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
-    if (ec) { std::cerr << "Nao foi possivel iniciar a varredura: " << ec.message() << "\n"; return 1; }
-
-    while (it != end) {
-        const fs::directory_entry entry = *it;
-        if (!csvPath.empty() && entry.path().lexically_normal() == csvPath) {
-            it.increment(ec);
-            if (ec) { ++skipped; ec.clear(); }
-            continue;
+    // Iteracao explicita por pasta: erro de acesso em uma pasta nao encerra a varredura inteira.
+    std::vector<fs::path> pending{root};
+    std::uintmax_t scannedDirectories = 0;
+    while (!pending.empty()) {
+        fs::path dir = std::move(pending.back());
+        pending.pop_back();
+        ++scannedDirectories;
+        std::error_code dirError;
+        fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, dirError), end;
+        if (dirError) { ++skipped; continue; }
+        while (it != end) {
+            const fs::directory_entry entry = *it;
+            std::error_code local;
+            bool isReparse = entry.is_symlink(local);
+#ifdef _WIN32
+            // Juncoes de diretorio no Windows nem sempre sao reportadas como symlinks.
+            DWORD attrs = GetFileAttributesW(entry.path().c_str());
+            if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT)) isReparse = true;
+#endif
+            if (local) { ++skipped; }
+            else if (isReparse) { ++skipped; }
+            else if (entry.is_directory(local) && !local) {
+                pending.push_back(entry.path());
+            } else if (entry.is_regular_file(local) && !local) {
+                if (!csvPath.empty() && entry.path().lexically_normal() == csvPath) {
+                    // Nunca mede o CSV que esta sendo escrito durante a leitura.
+                } else {
+                    auto bytes = entry.file_size(local);
+                    if (local) { ++skipped; }
+                    else {
+                        ++fileCount;
+                        totalBytes += bytes;
+                        if (csv) csv << csvEscape(utf8(entry.path())) << ',' << bytes << ','
+                                     << std::fixed << std::setprecision(6) << gib(bytes) << '\n';
+                        if (largest.size() < topN) largest.push_back({entry.path(), bytes});
+                        else {
+                            auto smallest = std::min_element(largest.begin(), largest.end(),
+                                [](const FileInfo& a, const FileInfo& b) { return a.size < b.size; });
+                            if (bytes > smallest->size) *smallest = {entry.path(), bytes};
+                        }
+                        for (fs::path parent = entry.path().parent_path(); ; parent = parent.parent_path()) {
+                            auto& f = folders[parent];
+                            f.path = parent;
+                            f.size += bytes;
+                            ++f.files;
+                            if (parent == root || parent == parent.parent_path()) break;
+                        }
+                    }
+                }
+            } else if (local) { ++skipped; }
+            it.increment(dirError);
+            if (dirError) {
+                ++skipped;
+                // A iteracao dessa pasta pode ter terminado, mas a pilha ainda possui outras pastas.
+                break;
+            }
         }
-        std::error_code local;
-        // Nunca segue links simbolicos/juncoes: evita ciclos e dupla contagem.
-        bool symlink = entry.is_symlink(local);
-        if (local) { ++skipped; }
-        else if (symlink) { if (entry.is_directory(local)) it.disable_recursion_pending(); ++skipped; }
-        else if (entry.is_regular_file(local) && !local) {
-            const auto bytes = entry.file_size(local);
-            if (!local) {
-                ++fileCount;
-                totalBytes += bytes;
-                if (csv) csv << csvEscape(utf8(entry.path())) << ',' << bytes << ','
-                             << std::fixed << std::setprecision(6) << gib(bytes) << '\n';
-                if (largest.size() < topN) largest.push_back({entry.path(), bytes});
-                else {
-                    auto smallest = std::min_element(largest.begin(), largest.end(),
-                        [](const FileInfo& a, const FileInfo& b) { return a.size < b.size; });
-                    if (bytes > smallest->size) *smallest = {entry.path(), bytes};
-                }
-                // Agrega bytes em cada pasta ancestral ate a raiz escolhida.
-                for (fs::path parent = entry.path().parent_path(); ; parent = parent.parent_path()) {
-                    auto& f = folders[parent];
-                    f.path = parent;
-                    f.size += bytes;
-                    ++f.files;
-                    if (parent == root || parent == parent.parent_path()) break;
-                }
-            } else ++skipped;
-        } else if (local) ++skipped;
-        it.increment(ec);
-        if (ec) { ++skipped; ec.clear(); }
     }
     std::vector<FolderInfo> direct;
     for (const auto& [path, info] : folders)
@@ -120,6 +141,7 @@ int main(int argc, char* argv[]) {
     std::sort(largest.begin(), largest.end(), [](const auto& a, const auto& b) { return a.size > b.size; });
 
     std::cout << "\nPasta analisada: " << utf8(root) << '\n'
+              << "Pastas visitadas: " << scannedDirectories << '\n'
               << "Arquivos encontrados: " << fileCount << '\n'
               << "Tamanho total encontrado: " << std::fixed << std::setprecision(2) << gib(totalBytes) << " GiB\n"
               << "Entradas ignoradas/erros: " << skipped << "\n\n"

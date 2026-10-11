@@ -2,7 +2,7 @@
 
 Analisador de espaço em disco em **C++17**, sem dependências externas. Projeto inicial para evoluir para uma interface com Qt e visualização gráfica.
 
-## Funcionalidades (v0.1)
+## Funcionalidades (v0.2)
 
 - Analisa recursivamente uma pasta ou unidade informada.
 - Mostra o tamanho agregado das subpastas imediatamente abaixo da raiz.
@@ -10,7 +10,9 @@ Analisador de espaço em disco em **C++17**, sem dependências externas. Projeto
 - Exporta **todos os arquivos acessíveis** para CSV (opcional).
 - Opera somente em modo leitura nos diretórios analisados: **não exclui arquivos**.
 - Não segue links simbólicos/junções, evitando ciclos e boa parte da dupla contagem.
-- Ignora permissões negadas e relata contagem aproximada de entradas ignoradas/erros.
+- Percorre diretórios com uma pilha explícita: se uma pasta falhar, continua nas demais.
+- Ignora junções/reparse points no Windows para evitar ciclos e contagens duplicadas.
+- Relata pastas visitadas e contagem aproximada de entradas ignoradas/erros.
 
 ## Requisitos
 
@@ -64,7 +66,7 @@ cmake -S . -B build && cmake --build build
 2. Adicionar barra de progresso e cancelamento de análise.
 3. Criar uma GUI com Qt Widgets.
 4. Gerar treemap por tamanho.
-5. Melhorar tratamento de erros, testes e desempenho em unidades NTFS grandes.
+5. Adicionar testes de integração e mais diagnósticos de erros de acesso em NTFS.
 
 ## Licença
 
