@@ -1,7 +1,18 @@
 cmake_minimum_required(VERSION 3.16)
-project(disk_inspector VERSION 0.1.0 LANGUAGES CXX)
-add_executable(disk-inspector src/main.cpp)
+project(disk_inspector VERSION 0.3.0 LANGUAGES CXX)
+add_executable(disk-inspector src/main.cpp src/scanner.cpp src/server.cpp)
 target_compile_features(disk-inspector PRIVATE cxx_std_17)
+target_include_directories(disk-inspector PRIVATE src)
+target_compile_definitions(disk-inspector PRIVATE DISK_INSPECTOR_WEB_DIR="${CMAKE_CURRENT_BINARY_DIR}/web")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/frontend/dist/index.html")
+    add_custom_command(TARGET disk-inspector POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/frontend/dist"
+            "${CMAKE_CURRENT_BINARY_DIR}/web")
+endif()
+if(WIN32)
+    target_link_libraries(disk-inspector PRIVATE ws2_32 shell32)
+endif()
 if(MSVC)
     target_compile_options(disk-inspector PRIVATE /W4 /utf-8)
 else()
