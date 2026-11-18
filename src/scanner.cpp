@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <iostream>
 #include <system_error>
+#include <utility>
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
@@ -13,28 +14,58 @@
 namespace fs = std::filesystem;
 namespace disk {
 std::string utf8(const fs::path& p) { auto s=p.u8string(); return {s.begin(),s.end()}; }
+namespace {
+#ifndef DISK_INSPECTOR_MAX_SKIPPED_ENTRIES
+#define DISK_INSPECTOR_MAX_SKIPPED_ENTRIES 10000
+#endif
+constexpr std::size_t maxSkippedEntries=DISK_INSPECTOR_MAX_SKIPPED_ENTRIES;
+SkipReason classifyError(const std::error_code& error,SkipReason fallback) {
+ if(error==std::errc::permission_denied)return SkipReason::PermissionDenied;
+ if(error==std::errc::no_such_file_or_directory||error==std::errc::not_a_directory)return SkipReason::FileNotFound;
+ return fallback;
+}
+void recordSkipped(Result& result,const fs::path& path,SkipCategory category,SkipReason reason,const std::error_code& error={}) noexcept {
+ ++result.skipped;
+ if(category==SkipCategory::Intentional)++result.skippedIntentional;else ++result.skippedErrors;
+ if(result.skippedEntries.size()>=maxSkippedEntries){++result.skippedNotStored;return;}
+ try {
+  SkippedEntry entry;entry.path=path;entry.category=category;entry.reason=reason;entry.errorCode=error?error.value():0;entry.occurredAt=std::chrono::system_clock::now();
+  entry.message=category==SkipCategory::Intentional?"Link simbólico ou ponto de nova análise ignorado pela política do scanner":error?error.message():"Falha sem código de erro disponível";
+  result.skippedEntries.push_back(std::move(entry));
+ } catch(...) { ++result.skippedNotStored; }
+}
+}
 Result scan(const fs::path& input, const std::atomic_bool* cancel, std::atomic<std::uint64_t>* progress, std::atomic<std::uint64_t>* progressBytes, std::atomic<std::uint64_t>* progressDirectories) {
  Result r; std::error_code ec; r.root=fs::weakly_canonical(input,ec); if(ec) r.root=fs::absolute(input,ec).lexically_normal();
  std::vector<fs::path> pending{r.root}; std::unordered_map<std::string,std::size_t> directories;
  while(!pending.empty()) {
   if(cancel && cancel->load()) { r.cancelled=true; break; }
   auto dir=std::move(pending.back()); pending.pop_back(); ++r.directories; if(progressDirectories)progressDirectories->store(r.directories);
-  std::error_code err; fs::directory_iterator it(dir,fs::directory_options::skip_permission_denied,err), end;
-  if(err) { ++r.skipped; continue; }
+  std::error_code err; fs::directory_iterator it(dir,err), end;
+  if(err) { recordSkipped(r,dir,SkipCategory::Error,classifyError(err,SkipReason::DirectoryReadError),err); continue; }
   while(it!=end) {
    if(cancel && cancel->load()) { r.cancelled=true; break; }
-   const auto entry=*it; std::error_code e; bool reparse=entry.is_symlink(e);
+   const auto entry=*it; const auto entryPath=entry.path(); std::error_code e; bool reparse=entry.is_symlink(e);
+   if(e) recordSkipped(r,entryPath,SkipCategory::Error,classifyError(e,SkipReason::MetadataError),e);
 #ifdef _WIN32
-   auto attrs=GetFileAttributesW(entry.path().c_str()); if(attrs!=INVALID_FILE_ATTRIBUTES && (attrs&FILE_ATTRIBUTE_REPARSE_POINT)) reparse=true;
+   if(!e){auto attrs=GetFileAttributesW(entryPath.c_str()); if(attrs!=INVALID_FILE_ATTRIBUTES && (attrs&FILE_ATTRIBUTE_REPARSE_POINT)) reparse=true;}
 #endif
-   if(e || reparse) ++r.skipped;
-   else if(entry.is_directory(e) && !e) { pending.push_back(entry.path()); directories.emplace(utf8(entry.path()),r.items.size()); r.items.push_back({entry.path(),true,0,0}); }
-   else if(entry.is_regular_file(e) && !e) {
-    auto n=entry.file_size(e); if(e) ++r.skipped; else { r.bytes+=n; ++r.files; if(progress) progress->store(r.files); if(progressBytes)progressBytes->store(r.bytes); r.items.push_back({entry.path(),false,n,1});
-     for(auto p=entry.path().parent_path();;p=p.parent_path()) { auto found=directories.find(utf8(p)); if(found!=directories.end()){auto& d=r.items[found->second];d.bytes+=n;d.files+=1;} if(p==r.root||p==p.parent_path()) break; }
+   if(!e&&reparse) recordSkipped(r,entryPath,SkipCategory::Intentional,SkipReason::ReparsePoint);
+   else if(!e) {
+    bool isDirectory=entry.is_directory(e);
+    if(e) recordSkipped(r,entryPath,SkipCategory::Error,classifyError(e,SkipReason::MetadataError),e);
+    else if(isDirectory) { pending.push_back(entryPath); directories.emplace(utf8(entryPath),r.items.size()); r.items.push_back({entryPath,true,0,0}); }
+    else {
+     bool isRegularFile=entry.is_regular_file(e);
+     if(e) recordSkipped(r,entryPath,SkipCategory::Error,classifyError(e,SkipReason::MetadataError),e);
+     else if(isRegularFile) {
+      auto n=entry.file_size(e); if(e) recordSkipped(r,entryPath,SkipCategory::Error,classifyError(e,SkipReason::FileSizeError),e); else { r.bytes+=n; ++r.files; if(progress) progress->store(r.files); if(progressBytes)progressBytes->store(r.bytes); r.items.push_back({entryPath,false,n,1});
+       for(auto p=entryPath.parent_path();;p=p.parent_path()) { auto found=directories.find(utf8(p)); if(found!=directories.end()){auto& d=r.items[found->second];d.bytes+=n;d.files+=1;} if(p==r.root||p==p.parent_path()) break; }
+      }
+     }
     }
-   } else if(e) ++r.skipped;
-   it.increment(err); if(err) { ++r.skipped; break; }
+   }
+   it.increment(err); if(err) { recordSkipped(r,dir,SkipCategory::Error,classifyError(err,SkipReason::DirectoryReadError),err); break; }
   }
  }
  return r;
