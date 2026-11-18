@@ -1,73 +1,96 @@
-# Disk Inspector
+﻿# Disk Inspector v0.3
 
-Analisador de espaço em disco em **C++17**, sem dependências externas. Projeto inicial para evoluir para uma interface com Qt e visualização gráfica.
+Analisador local de armazenamento com scanner em C++17, API HTTP em loopback e interface React + TypeScript + Vite. O scanner também continua disponível pela CLI. A aplicação é somente de leitura e não envia dados para serviços externos.
 
-## Funcionalidades (v0.2)
+## Arquitetura
 
-- Analisa recursivamente uma pasta ou unidade informada.
-- Mostra o tamanho agregado das subpastas imediatamente abaixo da raiz.
-- Mostra os N maiores arquivos encontrados.
-- Exporta **todos os arquivos acessíveis** para CSV (opcional).
-- Opera somente em modo leitura nos diretórios analisados: **não exclui arquivos**.
-- Não segue links simbólicos/junções, evitando ciclos e boa parte da dupla contagem.
-- Percorre diretórios com uma pilha explícita: se uma pasta falhar, continua nas demais.
-- Ignora junções/reparse points no Windows para evitar ciclos e contagens duplicadas.
-- Relata pastas visitadas e contagem aproximada de entradas ignoradas/erros.
+- `src/scanner.cpp` e `src/scanner.h`: percorrem pastas recursivamente, acumulam tamanho e contagem, pulam links simbólicos e reparse points do Windows e preservam erros parciais.
+- `src/server.cpp`: API HTTP nativa com sockets, vinculada exclusivamente a `127.0.0.1`; porta padrão 8765. A API mantém o resultado em memória e fornece listagem paginada de itens.
+- `frontend/`: React, TypeScript, Vite, Tailwind CSS e Lucide. A tabela e os gráficos usam os resultados da API.
+- `src/main.cpp`: seleciona a CLI ou o modo servidor.
 
-## Requisitos
+## Dependências de desenvolvimento
 
-- Windows 11 com Visual Studio Build Tools 2022+ (compilador C++) e CMake; ou Linux/macOS com compilador C++17 e CMake.
-- Não exige Qt nesta versão.
+- Windows 11, Visual Studio 2022 ou mais recente com componente de compilação C++, Windows SDK e CMake.
+- Node.js 20 ou mais recente e npm para instalar e compilar a interface.
+- O backend não baixa bibliotecas C++: usa somente a biblioteca padrão e Winsock no Windows.
 
-## Compilar no PowerShell (Windows)
+## Compilar e executar no Windows
 
-Abra um terminal com CMake e compilador C++ disponíveis:
+Compile primeiro a interface e os assets locais:
+
+```powershell
+cd frontend
+npm install
+npm run build
+cd ..
+```
+
+Em um terminal com CMake e compilador C++ no `PATH`:
 
 ```powershell
 cmake -S . -B build
 cmake --build build --config Release
 ```
 
-O executável com Visual Studio geralmente estará em `build\Release\disk-inspector.exe`.
+No modo de produção, o CMake copia os assets compilados para `build/web`. Inicie o aplicativo:
 
-## Executar
+```powershell
+.\build\Release\disk-inspector.exe --server
+```
+
+O aplicativo abre o navegador padrão em `http://127.0.0.1:8765` e serve o frontend e a API pela mesma origem. O backend também aceita uma porta alternativa:
+
+```powershell
+.\build\Release\disk-inspector.exe --server 8766
+```
+
+### Desenvolvimento separado
+
+Inicie o backend sem abrir a página de produção:
+
+```powershell
+.\build\Release\disk-inspector.exe --server --no-browser
+```
+
+Em outro terminal, inicie o frontend:
+
+```powershell
+cd frontend
+npm run dev
+```
+
+Abra `http://127.0.0.1:5173`. O proxy Vite direciona `/api` para `127.0.0.1:8765`.
+
+## CLI
 
 ```powershell
 .\build\Release\disk-inspector.exe --path "C:\Users" --top 30 --csv "relatorio.csv"
 ```
 
-Para analisar a unidade inteira, rode o PowerShell como administrador e use:
+Opções: `--help`, `--path`, `--top` e `--csv`.
 
-```powershell
-.\build\Release\disk-inspector.exe --path "C:\" --top 50 --csv "relatorio.csv"
-```
+## API local
 
-**Nota:** dependendo do gerador CMake, o executável pode estar diretamente em `build\`.
+| Método e rota | Uso |
+|---|---|
+| `GET /api/drives` | Unidades montadas, capacidade e espaço livre (Windows) |
+| `POST /api/scan` | Inicia uma análise; corpo JSON: `{"path":"C:\\\\Users"}` |
+| `GET /api/status` | Estado e contadores da análise |
+| `GET /api/items?path=...&offset=0&limit=200` | Itens diretos da pasta, paginados |
+| `POST /api/cancel` | Solicita cancelamento |
+| `GET /api/export.csv` | Exporta os resultados em memória |
 
-Também funciona em Linux:
+A API rejeita cabeçalhos `Origin` que não sejam os endereços de desenvolvimento locais e valida `Host`; ela não habilita CORS geral. Não use um proxy remoto para expor a porta.
 
-```bash
-cmake -S . -B build && cmake --build build
-./build/disk-inspector --path "$HOME" --top 20 --csv relatorio.csv
-```
+## Limitações conhecidas
 
-## Como ler o resultado
-
-- `GiB` = gibibytes (1 GiB = 1.073.741.824 bytes); difere ligeiramente do GB decimal.
-- As pastas listadas são as **subpastas imediatas da raiz**; o tamanho inclui os arquivos em subpastas internas.
-- Arquivos diretamente na raiz estão no total geral, mas não são listados como subpasta.
-- Arquivos de sistema, protegidos, bloqueados, dados de nuvem e metadados podem não ser contabilizados. Portanto a soma **não substitui** a leitura de espaço usado pelo Windows.
-- Não apague arquivos do Windows, Program Files ou AppData sem entender sua função.
-- O CSV pode conter nomes de usuário e caminhos sensíveis: ele é ignorado pelo Git por padrão. Revise antes de publicá-lo.
-
-## Próximas etapas
-
-1. Exibir todas as pastas em árvore e permitir navegação interativa.
-2. Adicionar barra de progresso e cancelamento de análise.
-3. Criar uma GUI com Qt Widgets.
-4. Gerar treemap por tamanho.
-5. Adicionar testes de integração e mais diagnósticos de erros de acesso em NTFS.
+- Um instalador que dispense Node.js e CMake no computador final ainda não está preparado; compile os assets e o executável antes da distribuição.
+- Para escolher uma pasta, a interface solicita o caminho local completo; o navegador não pode abrir um seletor nativo de pastas arbitrárias sem uma ponte local dedicada.
+- A listagem HTTP é paginada em lotes de até 500 itens. A interface mostra paginação. A consulta ainda filtra os itens em memória por pasta e pode usar memória proporcional à quantidade de entradas da análise.
+- A análise mede arquivos acessíveis, não o uso reportado pelo sistema operacional. Arquivos protegidos, metadados e dados em nuvem podem não ser contabilizados.
+- CSV e resultados podem conter caminhos pessoais. Os CSVs são ignorados pelo Git.
 
 ## Licença
 
-MIT.
+MIT. Consulte [LICENSE](LICENSE).
